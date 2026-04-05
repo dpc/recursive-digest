@@ -230,3 +230,55 @@ fn ignore_dir() -> Result<(), DigestError> {
     );
     Ok(())
 }
+
+#[test]
+fn additional_data_folded_into_name_hash() -> Result<(), DigestError> {
+    // Verify that additional_data is folded into the per-entry name hash
+    // as H(name || 0 || data), matching the README, rather than written
+    // separately to the parent hasher.
+    type Blake2b512 = blake2::Blake2b<U64>;
+
+    let tmp_dir = TempDir::new("recursive-digest-test-adata")?;
+    let dir_path = tmp_dir.path().join("d");
+    fs::create_dir_all(&dir_path)?;
+    let file_path = dir_path.join("f");
+    fs::File::create(&file_path)?.write_all(b"hello")?;
+
+    let extra = b"role=owner";
+
+    let digest = RecursiveDigest::<Blake2b512, _, _>::new()
+        .additional_data(|_entry, writer| {
+            writer.input(extra);
+            Ok(())
+        })
+        .build()
+        .get_digest_of(&dir_path)?;
+
+    // Reference computation per README:
+    //   file_hash = H("F" || file_content)
+    //   name_hash = H("f" || 0 || extra)
+    //   dir_hash  = H("D" || name_hash || file_hash)
+    let file_hash = {
+        let mut h = Blake2b512::new();
+        h.update(b"F");
+        h.update(b"hello");
+        h.finalize().to_vec()
+    };
+    let name_hash = {
+        let mut h = Blake2b512::new();
+        h.update(b"f");
+        h.update([0]);
+        h.update(extra);
+        h.finalize().to_vec()
+    };
+    let expected = {
+        let mut h = Blake2b512::new();
+        h.update(b"D");
+        h.update(&name_hash);
+        h.update(&file_hash);
+        h.finalize().to_vec()
+    };
+
+    assert_eq!(digest, expected);
+    Ok(())
+}
