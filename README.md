@@ -38,4 +38,27 @@ If optional additional data extensions is used, the `H(entry_name)` above become
 data is unspecified, but was intendet for fielsystem metadata like file system
 permissions and ownership.
 
+## Portability of non-UTF-8 paths
+
+Filenames and symlink targets that are valid UTF-8 are hashed as their
+UTF-8 bytes on every platform, so the resulting digest is bit-identical
+across operating systems. This is the portable case and covers the
+overwhelming majority of real-world trees.
+
+Filenames and symlink targets that are **not** valid UTF-8 cannot be
+hashed portably, because unix and Windows store them in fundamentally
+different byte representations. In that case the library falls back to
+the platform's native encoding:
+
+* on unix, the raw bytes of the `OsStr` (`OsStrExt::as_bytes`);
+* on Windows, the UTF-16 code units from `OsStrExt::encode_wide`
+  encoded as little-endian bytes (this captures unpaired surrogates);
+* on any other platform, the digest computation fails with
+  `DigestError::OsStrConversionError`, because there is no defined
+  byte representation to fall back to.
+
+If you rely on cross-platform reproducibility of digests, treat any
+tree containing non-UTF-8 path components as not portably
+content-addressable.
+
 

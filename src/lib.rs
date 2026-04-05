@@ -162,15 +162,46 @@ where
     }
 }
 
-#[cfg(unix)]
-fn hash_osstr<D: digest::Digest>(digest: &mut D, s: &OsStr) {
-    use std::os::unix::ffi::OsStrExt;
-    digest.update(s.as_bytes());
-}
+/// Feed the bytes of an [`OsStr`] into `digest`.
+///
+/// When `s` is valid UTF-8 we hash its UTF-8 bytes — this is the only
+/// path that produces a portable digest across platforms, and it is the
+/// overwhelmingly common case (all-ASCII / all-Unicode filenames).
+///
+/// When `s` is *not* valid UTF-8 we fall back to the platform's native
+/// byte representation, at the cost of cross-platform reproducibility
+/// (see the "Portability of non-UTF-8 paths" section of the README):
+///
+/// * on unix, the raw bytes from `OsStrExt::as_bytes()`;
+/// * on windows, the UTF-16 code units from `OsStrExt::encode_wide()`
+///   encoded as little-endian bytes (captures unpaired surrogates);
+/// * on other platforms we have no byte representation to fall back to
+///   and return [`DigestError::OsStrConversionError`].
+fn hash_osstr<D: digest::Digest>(digest: &mut D, s: &OsStr) -> Result<(), DigestError> {
+    if let Some(utf8) = s.to_str() {
+        digest.update(utf8.as_bytes());
+        return Ok(());
+    }
 
-#[cfg(not(unix))]
-fn hash_osstr<D: digest::Digest>(digest: &mut D, s: &OsStr) {
-    digest.update(s.to_string_lossy().as_bytes());
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        digest.update(s.as_bytes());
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in s.encode_wide() {
+            digest.update(unit.to_le_bytes());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = digest;
+        Err(DigestError::OsStrConversionError)
+    }
 }
 
 impl<D, FFilter, FAData> RecursiveDigest<D, FFilter, FAData>
@@ -238,7 +269,7 @@ where
                 hash_osstr(
                     &mut name_hasher,
                     entry.path().file_name().expect("must have a file_name"),
-                );
+                )?;
                 // additional data (optional)
                 (self.additional_data)(
                     &entry,
