@@ -1,7 +1,5 @@
-#![allow(deprecated)]
-
+use crev_recursive_digest::{DigestError, RecursiveDigest};
 use digest::consts::U64;
-use crev_recursive_digest::DigestError;
 use digest::Digest;
 use std::{
     collections::HashSet,
@@ -10,6 +8,42 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempdir::TempDir;
+
+type Blake2b512 = blake2::Blake2b<U64>;
+
+fn digest_all(root: &Path) -> Result<Vec<u8>, DigestError> {
+    RecursiveDigest::<Blake2b512, _, _>::new()
+        .build()
+        .get_digest_of(root)
+}
+
+fn digest_excluding(root: &Path, excluded: HashSet<PathBuf>) -> Result<Vec<u8>, DigestError> {
+    let root_owned = root.to_path_buf();
+    RecursiveDigest::<Blake2b512, _, _>::new()
+        .filter(move |entry| {
+            let rel_path = entry
+                .path()
+                .strip_prefix(&root_owned)
+                .expect("walkdir yields paths under root");
+            !excluded.contains(rel_path)
+        })
+        .build()
+        .get_digest_of(root)
+}
+
+fn digest_including(root: &Path, included: HashSet<PathBuf>) -> Result<Vec<u8>, DigestError> {
+    let root_owned = root.to_path_buf();
+    RecursiveDigest::<Blake2b512, _, _>::new()
+        .filter(move |entry| {
+            let rel_path = entry
+                .path()
+                .strip_prefix(&root_owned)
+                .expect("walkdir yields paths under root");
+            included.contains(rel_path)
+        })
+        .build()
+        .get_digest_of(root)
+}
 
 #[test]
 fn sanity() -> Result<(), DigestError> {
@@ -33,14 +67,9 @@ fn sanity() -> Result<(), DigestError> {
     file.write_all(msg)?;
     drop(file);
 
-    let empty = HashSet::new();
+    let file_digest = digest_all(&file_path)?;
 
-    let file_digest = crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-        &file_path, // "recursive-digest-test/b"
-        &empty,     // Exclude no files
-    )?;
-
-    let mut hasher = blake2::Blake2b::<U64>::new();
+    let mut hasher = Blake2b512::new();
     hasher.update(b"F");
     hasher.update(msg);
 
@@ -53,15 +82,12 @@ fn sanity() -> Result<(), DigestError> {
         "e41c3b6ac2b512af3a14eb11faed1486f693ce3bd3606afbe458e183ae4e1080a4209f44ada1c186920f541d41a192eaa654fee6792a6ac008f44f783a59176d"
     );
 
-    let dir_digest = crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-        &dir_path, // "recursive-digest-test/a/"
-        &empty,    // Exclude no files
-    )?;
+    let dir_digest = digest_all(&dir_path)?;
     assert_ne!(&dir_digest, &standalone_file_digest);
-    let mut hasher = blake2::Blake2b::<U64>::new();
+    let mut hasher = Blake2b512::new();
     hasher.update(b"D");
     hasher.update(
-        &hex::decode(
+        hex::decode(
             "ca002330e69d3e6b84a46a56a6533fd79d51d97a3bb7cad6c2ff43b354185d6dc1e723fb3db4ae0737e120378424c714bb982d9dc5bbd7a0ab318240ddd18f8d"
         ).unwrap()
     );
@@ -111,10 +137,7 @@ fn backward_comp() -> Result<(), DigestError> {
 
     symlink_file(std::path::PathBuf::from("../../a"), path.join("h"))?;
 
-    let dir_digest = crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-        &dir_path,
-        &HashSet::new(),
-    )?;
+    let dir_digest = digest_all(&dir_path)?;
 
     assert_eq!(
         hex::encode(dir_digest),
@@ -132,28 +155,20 @@ fn test_file_digest() -> Result<(), DigestError> {
     let mut file_in_dir = fs::File::create(&file_in_dir_path)?;
     file_in_dir.write_all(foo_content)?;
 
-    let empty = HashSet::new();
-
     let expected = {
-        let mut hasher = blake2::Blake2b::<U64>::new();
+        let mut hasher = Blake2b512::new();
         hasher.update(b"F");
         hasher.update(foo_content);
         hasher.finalize().to_vec()
     };
 
-    assert_eq!(
-        crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-            &file_in_dir_path,
-            &empty
-        )?,
-        expected
-    );
+    assert_eq!(digest_all(&file_in_dir_path)?, expected);
 
     Ok(())
 }
 
 #[test]
-// Tests the inclusion and exclusing of paths.
+// Tests the inclusion and exclusion of paths.
 fn test_exclude_include_path() -> Result<(), DigestError> {
     let tmp_dir = TempDir::new("recursive-digest-test3")?;
 
@@ -168,16 +183,16 @@ fn test_exclude_include_path() -> Result<(), DigestError> {
     file_in_dir_2.write_all(bar_content)?;
 
     let expected = {
-        let mut hasher = blake2::Blake2b::<U64>::new();
+        let mut hasher = Blake2b512::new();
         hasher.update(b"F");
         hasher.update(bar_content);
         let file_sum = hasher.finalize().to_vec();
 
-        let mut hasher = blake2::Blake2b::<U64>::new();
+        let mut hasher = Blake2b512::new();
         hasher.update(b"bar");
         let dir_sum = hasher.finalize().to_vec();
 
-        let mut hasher = blake2::Blake2b::<U64>::new();
+        let mut hasher = Blake2b512::new();
         hasher.update(b"D");
         hasher.update(dir_sum);
         hasher.update(file_sum);
@@ -186,23 +201,11 @@ fn test_exclude_include_path() -> Result<(), DigestError> {
 
     let mut excluded = HashSet::new();
     excluded.insert(Path::new("foo").to_path_buf());
-    assert_eq!(
-        crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-            tmp_dir.path(),
-            &excluded
-        )?,
-        expected
-    );
+    assert_eq!(digest_excluding(tmp_dir.path(), excluded)?, expected);
 
     let mut included = HashSet::new();
     included.insert(Path::new("bar").to_path_buf());
-    assert_eq!(
-        crev_recursive_digest::get_recursive_digest_for_paths::<blake2::Blake2b<U64>, _>(
-            tmp_dir.path(),
-            included
-        )?,
-        expected
-    );
+    assert_eq!(digest_including(tmp_dir.path(), included)?, expected);
 
     Ok(())
 }
@@ -218,19 +221,12 @@ fn ignore_dir() -> Result<(), DigestError> {
     fs::create_dir_all(d1.join("a/b2/c/d"))?;
     fs::create_dir_all(&d2)?;
 
-    let excluded_empty = HashSet::new();
     let mut excluded_a = HashSet::new();
     excluded_a.insert(PathBuf::from("a"));
 
     assert_eq!(
-        crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-            &d1,
-            &excluded_a
-        )?,
-        crev_recursive_digest::get_recursive_digest_for_dir::<blake2::Blake2b<U64>, _>(
-            &d2,
-            &excluded_empty
-        )?,
+        digest_excluding(&d1, excluded_a)?,
+        digest_all(&d2)?,
     );
     Ok(())
 }
