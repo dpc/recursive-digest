@@ -262,23 +262,26 @@ where
             // top level directory includes only content, no name or additional_data
             // names and additional data go the hasher above the one we just prepared
             if 0 < depth {
-                let hasher = hashers.get_mut(depth - 1).expect("must not happen");
-
                 let mut name_hasher = D::new();
                 // name
                 hash_osstr(
                     &mut name_hasher,
                     entry.path().file_name().expect("must have a file_name"),
                 )?;
-                // additional data (optional)
+                // additional data (optional) — folded into the entry-name hash
+                // per the README algorithm: H(entry_name || 0 || additional_data)
                 (self.additional_data)(
                     &entry,
                     &mut AdditionalDataWriter {
-                        hasher,
+                        hasher: &mut name_hasher,
                         used: false,
                     },
                 )?;
-                <D as digest::Digest>::update(hasher, name_hasher.finalize_fixed().as_slice());
+                let parent_hasher = hashers.get_mut(depth - 1).expect("must not happen");
+                <D as digest::Digest>::update(
+                    parent_hasher,
+                    name_hasher.finalize_fixed().as_slice(),
+                );
             }
 
             // content
